@@ -39,7 +39,7 @@ class Collector:
                 cost, fn = providers.get(name)
                 m, raw = fn()
                 snap.add_all(m)
-                raw_ctx[name] = raw
+                raw_ctx.update(raw or {})   # providers own their top-level keys
             except Exception as exc:  # noqa: BLE001
                 snap.add(Metric(f"{name}.error", None, source=name, available=False,
                                 validity="error", note=str(exc)))
@@ -55,7 +55,7 @@ class Collector:
                     else:
                         m, raw = fn()
                     snap.add_all(m)
-                    raw_ctx[name] = raw
+                    raw_ctx.update(raw or {})
                 except Exception as exc:  # noqa: BLE001
                     snap.add(Metric(f"{name}.error", None, source=name, available=False,
                                     validity="error", note=str(exc)))

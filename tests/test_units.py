@@ -112,3 +112,19 @@ def test_history_csv():
     out = c.history_to_csv(items)
     assert "cpu.load_pct" in out
     assert out.count("\n") == 3
+
+
+def test_collector_raw_not_double_nested():
+    """Regression: raw must expose provider keys at top level (no nested wrapper)."""
+    from xpu_observer.core.collector import Collector
+    col = Collector()
+    snap = col.collect_once(force_slow=True)
+    raw = snap.raw
+    # npu provider must expose its own subkeys (kernels/xrt), not {"npu": {...}}
+    if "npu" in raw:
+        assert isinstance(raw["npu"], dict)
+        assert "kernels" in raw["npu"] or "xrt" in raw["npu"]
+        # a nested 'npu' key inside raw["npu"] would be the double-nesting bug
+        assert "npu" not in raw["npu"]
+    if "processes" in raw:
+        assert isinstance(raw["processes"], list)
