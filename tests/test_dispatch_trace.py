@@ -189,6 +189,37 @@ def test_xdna_runner_reports(tmp_path):
     assert tr.stats()["verdict"] == "HOST_BOUND"
 
 
+def test_ingest_hook_logs(tmp_path):
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "npuhook_dll.log").write_text(
+        "=== InitializeHooks v5 ===\n"
+        "Exec NPU : 12.34 ms  (avg=12.00  min=10.00  max=15.00  total=123)\n"
+        "Exec NPU : 9.87 ms  (avg=11.00  min=9.00  max=15.00  total=246)\n",
+        encoding="utf-8")
+    tr = DispatchTracer()
+    assert tr.ingest_hook_logs(str(tmp_path)) == 2
+    assert tr.spans[0].kernel == "npu_hook"
+    assert tr.spans[0].npu_us == 12340.0
+    assert tr.spans[0].source == "NpuHook.dll"
+
+
+def test_deploy_hooks_and_rollback(tmp_path):
+    from xpu_observer.hooks.deploy import deploy_hooks, rollback
+    hooks = tmp_path / "hooks"
+    hooks.mkdir()
+    (hooks / "NpuHook.dll").write_bytes(b"NEW")
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "NpuHook.dll").write_bytes(b"OLD")
+    man = deploy_hooks(str(target), str(hooks), npuhook=True, monitor=False)
+    assert (target / "NpuHook.dll").read_bytes() == b"NEW"
+    assert any(a["op"] == "copied" for a in man["actions"])
+    r = rollback(str(target))
+    assert r["ok"]
+    assert (target / "NpuHook.dll").read_bytes() == b"OLD"
+
+
 def test_ingest_directory_autodetect(tmp_path):
     _write(tmp_path, "xdna_profile.csv",
            "kernel,submit_us,wait_us,npu_us,sync_us,host_us,status\nk,1,2,3,4,5,ok\n")

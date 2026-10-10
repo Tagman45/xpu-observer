@@ -47,6 +47,7 @@ _PHASES = ("host_pre", "xrt_submit", "cx_wait", "np_dispatch", "np_completion",
            "instr_build", "instr_cache_hit")
 
 _RUNNER_MS = re.compile(r"([a-z0-9_]+)_ms=([\d.]+)")
+_NPUHOOK_EXEC = re.compile(r"Exec NPU\s*:\s*([\d.]+)\s*ms")
 
 
 def _norm_field(header: str) -> Optional[str]:
@@ -365,12 +366,45 @@ class DispatchTracer:
             n = self.ingest_xdna_runner_reports(path)
             if n:
                 counts["xdna-runner report.json"] = n
+            h = self.ingest_hook_logs(path)
+            if h:
+                counts["hook logs (NpuHook)"] = h
             for pat in ("xdna_profile*.csv", "dispatch*.csv", "*.jsonl", "runtime_trace*.log",
                         "runtime_stdout.log", "xrt_trace*.csv"):
                 for f in sorted(glob.glob(os.path.join(path, pat))):
                     counts[f] = self._ingest_one(f)
             return {"ingested": counts}
         return {"ingested": {path: self._ingest_one(path)}}
+
+    def ingest_hook_logs(self, root: str) -> int:
+        """Ingest hook-captured dispatch events from NpuHook.dll logs.
+
+        NpuHook.dll (MinHook on xrt_coreutil) prints `Exec NPU : X ms (...)` lines and
+        writes logs under `<cwd>/logs/` (npuhook_dll.log, fence.log, xclbin.log,
+        preemption.log). Each `Exec NPU` line is one observed NPU execution time.
+        """
+        n = 0
+        pats = (os.path.join(root, "**", "logs", "*.log"),
+                os.path.join(root, "**", "npuhook_dll.log"),
+                os.path.join(root, "**", "fence.log"))
+        seen: set[str] = set()
+        for pat in pats:
+            for f in glob.glob(pat, recursive=True):
+                if f in seen:
+                    continue
+                seen.add(f)
+                try:
+                    with open(f, encoding="utf-8", errors="replace") as fh:
+                        for line in fh:
+                            m = _NPUHOOK_EXEC.search(line)
+                            if m:
+                                self.add_span(kernel="npu_hook",
+                                              npu_us=float(m.group(1)) * 1000,
+                                              source="NpuHook.dll")
+                                n += 1
+                except Exception:  # noqa: BLE001
+                    continue
+        return n
 
     def ingest_xdna_runner_reports(self, root: str) -> int:
         """Ingest `open-xdna-runtime` run reports: each report.json carries the runner

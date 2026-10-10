@@ -1,8 +1,9 @@
-"""Collector — runs providers once per pass and keeps the latest consistent snapshot.
+"""Collector — one collection pass -> one published Snapshot.
 
-The snapshot is the single source of truth for UI, API, MCP and exporters. History is
-bounded and stores metric values only (raw structured data is not retained in history
-to keep memory low).
+Fast/slow decoupling: cheap providers (cpu/ram/pdh/etw) publish every cycle (~2 s) so
+the disk recorder and the UI stay fresh; expensive providers (xrt/gpu/processes, which
+can take seconds) run on a separate background pass and are merged in as soon as ready.
+The noisy slow pass never blocks the frequent log.
 """
 from __future__ import annotations
 
@@ -27,39 +28,36 @@ class Collector:
         self._cycle = 0
         self.snapshot = Snapshot()
         self.history: deque[dict[str, Any]] = deque(maxlen=history_max)
-        self._last_run: dict[str, float] = {}
+        self._slow_m: list[Metric] = []
+        self._slow_raw: dict[str, Any] = {}
+        self._slow_busy = False
 
-    def collect_once(self, force_slow: bool = False) -> Snapshot:
-        snap = Snapshot()
-        raw_ctx: dict[str, Any] = {}
-        self._cycle += 1
-        fast = [n for n, (c, _) in providers.REGISTRY.items() if c == "fast"]
-        for name in fast:
+    # ------------------------------------------------------------------ helpers
+    def _run(self, names: list[str], raw_ctx: dict[str, Any]) -> list[Metric]:
+        metrics: list[Metric] = []
+        for name in names:
             try:
-                cost, fn = providers.get(name)
-                m, raw = fn()
-                snap.add_all(m)
+                _cost, fn = providers.get(name)
+                if name == "processes":
+                    xrt_raw = (raw_ctx.get("npu") or {}).get("xrt")
+                    m, raw = fn(xrt_raw)
+                else:
+                    m, raw = fn()
+                metrics += list(m)
                 raw_ctx.update(raw or {})   # providers own their top-level keys
             except Exception as exc:  # noqa: BLE001
-                snap.add(Metric(f"{name}.error", None, source=name, available=False,
-                                validity="error", note=str(exc)))
-        slow = bool(self._cycle % 4 == 0) or force_slow
-        if slow:
-            for name in SLOW_ORDER:
-                try:
-                    cost, fn = providers.get(name)
-                    # processes needs xrt contexts for NPU attribution
-                    if name == "processes":
-                        xrt_raw = raw_ctx.get("npu", {}).get("xrt")
-                        m, raw = fn(xrt_raw)
-                    else:
-                        m, raw = fn()
-                    snap.add_all(m)
-                    raw_ctx.update(raw or {})
-                except Exception as exc:  # noqa: BLE001
-                    snap.add(Metric(f"{name}.error", None, source=name, available=False,
-                                    validity="error", note=str(exc)))
-        snap.raw = raw_ctx
+                metrics.append(Metric(f"{name}.error", None, source=name,
+                                      available=False, validity="error", note=str(exc)))
+        return metrics
+
+    def _publish(self, fast_m: list[Metric], fast_raw: dict[str, Any]) -> Snapshot:
+        with self._lock:
+            slow_m = list(self._slow_m)
+            slow_raw = dict(self._slow_raw)
+        snap = Snapshot()
+        snap.add_all(slow_m)          # last known slow data
+        snap.add_all(fast_m)          # fresh fast data overrides
+        snap.raw = {**slow_raw, **fast_raw}
         snap.ts = time.time()
         with self._lock:
             self.snapshot = snap
@@ -68,6 +66,49 @@ class Collector:
         self.bus.publish("metrics", snap)
         return snap
 
+    # ------------------------------------------------------------------ passes
+    def collect_fast(self) -> Snapshot:
+        """Cheap pass only — runs every cycle, never blocked by slow providers."""
+        self._cycle += 1
+        raw: dict[str, Any] = {}
+        fast = [n for n, (c, _) in providers.REGISTRY.items() if c == "fast"]
+        m = self._run(fast, raw)
+        return self._publish(m, raw)
+
+    def collect_slow(self) -> None:
+        """Expensive pass — call from a background thread. Guarded against overlap."""
+        if self._slow_busy:
+            return
+        self._slow_busy = True
+        try:
+            raw: dict[str, Any] = {}
+            m = self._run(SLOW_ORDER, raw)
+            with self._lock:
+                self._slow_m = m
+                self._slow_raw = raw
+        finally:
+            self._slow_busy = False
+
+    def collect_once(self, force_slow: bool = False) -> Snapshot:
+        """Synchronous full pass (tests / --once / one-shot). Fast + optional slow."""
+        self._cycle += 1
+        raw: dict[str, Any] = {}
+        fast = [n for n, (c, _) in providers.REGISTRY.items() if c == "fast"]
+        m = self._run(fast, raw)
+        if force_slow or self._cycle % 4 == 0:
+            slow_raw: dict[str, Any] = {}
+            sm = self._run(SLOW_ORDER, slow_raw)
+            with self._lock:
+                self._slow_m = sm
+                self._slow_raw = slow_raw
+            raw.update(slow_raw)
+        return self._publish(m, raw)
+
+    @property
+    def slow_busy(self) -> bool:
+        return self._slow_busy
+
+    # ------------------------------------------------------------------ reads
     def snap(self) -> Snapshot:
         with self._lock:
             s = self.snapshot

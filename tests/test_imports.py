@@ -20,6 +20,7 @@ MODULES = [
     "xpu_observer.hooks.compatibility",
     "xpu_observer.hooks.manager",
     "xpu_observer.hooks.verifier",
+    "xpu_observer.hooks.deploy",
     "xpu_observer.diagnostics.correlation",
     "xpu_observer.diagnostics.dispatch",
     "xpu_observer.diagnostics.ctrlcode",

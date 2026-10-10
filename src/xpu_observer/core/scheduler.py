@@ -1,8 +1,8 @@
-"""Scheduler — background collection loop. Never blocks the UI.
+"""Scheduler — background collection loop. Never blocks the UI or the recorder.
 
-Cadence is coarse by design: fast providers each cycle, slow providers every N cycles.
-Costly operations (xrt-smi subprocess, nvidia-smi, DLL scan) are confined to the slow
-path so the loop stays light.
+Fast providers run every cycle (kept cheap); the expensive slow pass (xrt/gpu/processes,
+which can take seconds) runs on its own background thread so the frequent fast publish —
+and therefore the disk log — is never delayed by it.
 """
 from __future__ import annotations
 
@@ -21,6 +21,7 @@ class Scheduler:
         self._slow_every = slow_every
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        self._slow_thread: Optional[threading.Thread] = None
         self._last_slow = 0.0
 
     def start(self) -> "Scheduler":
@@ -42,10 +43,17 @@ class Scheduler:
         while not self._stop.is_set():
             t0 = time.monotonic()
             try:
-                slow = (time.monotonic() - self._last_slow >= self._interval * self._slow_every)
-                if slow:
+                self._col.collect_fast()             # publish fast every cycle
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                due = time.monotonic() - self._last_slow >= self._interval * self._slow_every
+                idle = self._slow_thread is None or not self._slow_thread.is_alive()
+                if due and idle and not self._stop.is_set():
                     self._last_slow = time.monotonic()
-                self._col.collect_once(force_slow=slow)
+                    self._slow_thread = threading.Thread(
+                        target=self._col.collect_slow, name="xpu-slow", daemon=True)
+                    self._slow_thread.start()
             except Exception:  # noqa: BLE001
                 pass
             dt = time.monotonic() - t0
