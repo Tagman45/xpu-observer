@@ -91,7 +91,7 @@ Bound to `127.0.0.1` only. No write endpoints.
 | V0.1 | PDH WDDM loads | ✅ | ✅ | ✅ (this machine) |
 | V0.1 | XRT contexts/dispatches | ✅ | ✅ parser | ✅ (this machine, idle) |
 | V0.1 | Multi-GPU (nvidia-smi) | ✅ | ✅ | ✅ (RTX 5070) |
-| V0.1 | tkinter dashboard + hooks queue | ✅ | ✅ import | manual |
+| V0.1 | tkinter 6-tab UI (Dashboard/Processes/NPU/Hooks/MCP/Settings) | ✅ | ✅ construct | manual |
 | V0.2 | MCP stdio server | ✅ | ✅ e2e handshake | ✅ (real pipes) |
 | V0.2 | Local HTTP API | ✅ | ✅ | ✅ |
 | V0.2 | CSV/JSON export | ✅ | ✅ | ✅ |
