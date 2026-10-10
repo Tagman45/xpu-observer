@@ -9,6 +9,7 @@ records the user's consent (it never injects a DLL by itself).
 """
 from __future__ import annotations
 
+import threading
 import time
 import tkinter as tk
 from tkinter import ttk
@@ -98,8 +99,30 @@ class XPUApp:
         self.root.geometry("920x600")
         self.root.configure(bg=BG)
         self._refreshing = False
+        self._caps: Optional[dict] = None       # filled by background thread
+        self._hook_rows: list = []
         self._build()
+        # Heavy work (capability detection, hook process-scan) runs OFF the Tk thread.
+        threading.Thread(target=self._caps_bg, name="ui-caps", daemon=True).start()
+        threading.Thread(target=self._hook_bg, name="ui-hooks", daemon=True).start()
         self.root.after(300, self._refresh)
+
+    def _caps_bg(self) -> None:
+        try:
+            self._caps = self.app.caps
+        except Exception:  # noqa: BLE001
+            self._caps = {}
+
+    def _hook_bg(self) -> None:
+        while True:
+            try:
+                h = self.app.hooks
+                if h is not None:
+                    h.detect()
+                    self._hook_rows = h.status().get("hooks", [])
+            except Exception:  # noqa: BLE001
+                pass
+            time.sleep(10)
 
     # ------------------------------------------------------------------ build
     def _build(self) -> None:
@@ -280,9 +303,10 @@ class XPUApp:
             self._refresh_hooks()
             self._refresh_mcp()
 
+            caps = self._caps or {}
             self.status.config(text=f"ts={snap.ts:.1f}  metrics={len(m)}  "
-                                    f"gpus={len(self.app.caps.get('gpus', []))}  "
-                                    f"npu_present={self.app.caps.get('npu', {}).get('present')}")
+                                    f"gpus={len(caps.get('gpus', []))}  "
+                                    f"npu_present={caps.get('npu', {}).get('present')}")
         except Exception as exc:  # noqa: BLE001
             try:
                 self.status.config(text=f"refresh error: {exc}")
@@ -322,23 +346,17 @@ class XPUApp:
                 self.npu_ctx.insert("end", f"  {k.get('kind'):<12} {k.get('name')}\n")
 
     def _refresh_hooks(self) -> None:
-        h = self.app.hooks
-        if h is None:
-            return
-        if not h._runtimes:
-            try:
-                h.detect()
-            except Exception:  # noqa: BLE001
-                pass
         self.hook_tree.delete(*self.hook_tree.get_children())
-        for row in h.status()["hooks"]:
+        for row in self._hook_rows:            # cached by background thread
             self.hook_tree.insert("", "end", values=(
                 row["id"], row["state"], row["runtime"], row["target_dll"],
                 row["reason"]))
         self.hook_pending.delete(0, "end")
-        for req in h.pending:
-            self.hook_pending.insert("end", f"{req['request_id']} [{req['action']}] "
-                                            f"{req['hook']} pid={req.get('pid')}")
+        h = self.app.hooks
+        if h is not None:
+            for req in list(h.pending):
+                self.hook_pending.insert("end", f"{req['request_id']} [{req['action']}] "
+                                                f"{req['hook']} pid={req.get('pid')}")
 
     def _refresh_mcp(self) -> None:
         if self.mcp_txt.get("1.0", "end").strip():
