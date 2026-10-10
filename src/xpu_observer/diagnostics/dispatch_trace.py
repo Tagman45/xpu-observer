@@ -87,6 +87,7 @@ class DispatchSpan:
     npu_us: float = 0.0
     sync_us: float = 0.0
     host_us: float = 0.0
+    total_us: float = 0.0            # measured total (dialects without breakdown)
     instruction_cache: str = "unknown"  # hit | miss | unknown
 
     @property
@@ -96,6 +97,15 @@ class DispatchSpan:
     @property
     def host_total_us(self) -> float:
         return self.submit_us + self.wait_us + self.host_us
+
+    @property
+    def measure_us(self) -> float:
+        """Best available duration: real breakdown total, else measured total, else ns."""
+        if any((self.submit_us, self.wait_us, self.npu_us, self.sync_us, self.host_us)):
+            return self.submit_us + self.wait_us + self.npu_us + self.sync_us + self.host_us
+        if self.total_us:
+            return self.total_us
+        return self.dur_ns / 1000.0
 
     def as_dict(self) -> dict[str, Any]:
         return {"pid": self.pid, "tid": self.tid, "hwctx_id": self.hwctx_id,
@@ -108,7 +118,8 @@ class DispatchSpan:
                                  "wait": round(self.wait_us, 1),
                                  "npu": round(self.npu_us, 1),
                                  "sync": round(self.sync_us, 1),
-                                 "host": round(self.host_us, 1)},
+                                 "host": round(self.host_us, 1),
+                                 "total": round(self.total_us, 1)},
                 "instruction_cache": self.instruction_cache}
 
 
@@ -117,6 +128,7 @@ class TokenSpan:
     token_id: Any
     begin_ns: int
     end_ns: int
+    total_us: float = 0.0
 
 
 class DispatchTracer:
@@ -247,38 +259,87 @@ class DispatchTracer:
         return n
 
     def ingest_csv(self, path: str) -> int:
-        n = 0
+        """Auto-detects dialects:
+          - xdna_profile (header: token_idx, sync_pre_us) with '_TOKEN' aggregate rows;
+          - breakdown (submit_us/wait_us/npu_us/sync_us/host_us);
+          - start_ns complete spans.
+        """
         with open(path, encoding="utf-8", errors="replace", newline="") as fh:
-            reader = csv.DictReader(fh)
-            cols = reader.fieldnames or []
-            canon = {c: _norm_field(c) for c in cols}
-            if "start_ns" in canon.values():
-                for row in reader:
-                    if any(v not in (None, "") for v in row.values()):
-                        self.add_span(**{canon[c]: _num(row[c]) for c in cols if canon[c]})
-                        n += 1
-            elif "submit_us" in canon.values():  # runtime profiler breakdown style
-                acc = 0
-                for row in reader:
-                    if all(row.get(c) in (None, "") for c in cols if canon[c]):
-                        continue
-                    breakdown = {canon[c]: _num(row[c]) for c in cols
-                                 if canon[c] and canon[c] in
-                                 ("submit_us", "wait_us", "npu_us", "sync_us", "host_us")}
-                    start = int(acc)
-                    dur = int(sum(breakdown.values()) * 1000)
-                    acc += dur
-                    kw = {canon[c]: _num(row[c]) for c in cols
-                          if canon[c] and canon[c] not in
-                          ("submit_us", "wait_us", "npu_us", "sync_us", "host_us")}
-                    kw.update(breakdown)
-                    kw.update(start_ns=start, end_ns=start + dur)
-                    self.add_span(**kw)
+            lines = [ln for ln in fh if ln.startswith("#") is False]
+        if not lines:
+            return 0
+        header = lines[0].strip().split(",")
+        if "token_idx" in header and "sync_pre_us" in header:
+            return self._ingest_xdna_profile_lines(header, lines[1:])
+        return self._ingest_csv_generic(header, lines[1:])
+
+    def _ingest_csv_generic(self, header: list[str], rows: list[str]) -> int:
+        n = 0
+        import io as _io
+        reader = csv.DictReader(_io.StringIO("\n".join([",".join(header)] + rows)))
+        cols = reader.fieldnames or []
+        canon = {c: _norm_field(c) for c in cols}
+        if "start_ns" in canon.values():
+            for row in reader:
+                if any(v not in (None, "") for v in row.values()):
+                    self.add_span(**{canon[c]: _num(row[c]) for c in cols if canon[c]})
                     n += 1
-            else:
+        elif "submit_us" in canon.values():  # runtime profiler breakdown style
+            acc = 0
+            for row in reader:
+                if all(row.get(c) in (None, "") for c in cols if canon[c]):
+                    continue
+                breakdown = {canon[c]: _num(row[c]) for c in cols
+                             if canon[c] and canon[c] in
+                             ("submit_us", "wait_us", "npu_us", "sync_us", "host_us")}
+                start = int(acc)
+                dur = int(sum(breakdown.values()) * 1000)
+                acc += dur
+                kw = {canon[c]: _num(row[c]) for c in cols
+                      if canon[c] and canon[c] not in
+                      ("submit_us", "wait_us", "npu_us", "sync_us", "host_us")}
+                kw.update(breakdown)
+                kw.update(start_ns=start, end_ns=start + dur)
+                self.add_span(**kw)
+                n += 1
+        else:
+            for row in reader:
                 self.add_span(**{canon[c]: _num(row[c]) for c in cols if canon[c]})
                 n += 1
         return n
+
+    def _ingest_xdna_profile_lines(self, header: list[str], rows: list[str]) -> int:
+        """Native runtime dialect. Header comment documents remap:
+        submit_us=total_us, wait_us=dispatch_count(signed mirror in captures),
+        sync_pre_us=npu_us, sync_post_us=sync_us, host_pre_us=host_us.
+        '_TOKEN' rows are per-token aggregates; other rows per dispatch."""
+        idx = {c: i for i, c in enumerate(header)}
+        def g(row, col):
+            i = idx.get(col)
+            if i is None or i >= len(row) or row[i] in ("", None):
+                return 0.0
+            try:
+                return float(row[i])
+            except Exception:  # noqa: BLE001
+                return 0.0
+        acc = 0.0
+        for raw in rows:
+            row = raw.strip().split(",")
+            if not row or row[0].strip() == "":
+                continue
+            token = int(_num(row[idx["token_idx"]]))
+            kernel = str(row[idx["kernel"]])
+            total = g(row, "submit_us")
+            if kernel == "_TOKEN":
+                self.tokens.append(TokenSpan(token, int(acc * 1000),
+                                             int((acc + total) * 1000), total_us=total))
+                acc += total
+            else:
+                self.add_span(kernel=kernel, token_id=token, total_us=total,
+                              submit_us=0.0, wait_us=0.0,
+                              npu_us=g(row, "sync_pre_us"), sync_us=g(row, "sync_post_us"),
+                              host_us=g(row, "host_pre_us"), source="xdna_profile")
+        return len(rows)
 
     def ingest_tokens_log(self, path: str) -> int:
         n = 0
@@ -341,7 +402,7 @@ class DispatchTracer:
             e = per_kernel.setdefault(k, {"n": 0.0, "dur_us": 0.0, "npu_us": 0.0,
                                           "sync_us": 0.0, "wait_us": 0.0,
                                           "host_us": 0.0, "max_dur_us": 0.0})
-            d = sp.dur_ns / 1000.0
+            d = sp.measure_us
             e["n"] += 1; e["dur_us"] += d
             e["npu_us"] += sp.npu_us; e["sync_us"] += sp.sync_us
             e["wait_us"] += sp.wait_us; e["host_us"] += sp.host_us
@@ -349,13 +410,24 @@ class DispatchTracer:
             host_total += sp.host_total_us + sp.sync_us
             npu_total += sp.npu_us; sync_total += sp.sync_us; wait_total += sp.wait_us
         total = host_total + npu_total
+        breakdown_present = total > 0
         hit = getattr(self, "instr_cache_hits", 0)
         miss = getattr(self, "instr_builds", 0) or max(0, len(self._instr_seen))
         bo_unique = len(self._bo_alloc_count) or max(0, len({s.bo_id for s in self.spans if s.bo_id >= 0}))
+        token_us = [t.total_us for t in self.tokens if t.total_us]
+        tok = {}
+        if token_us:
+            tok = {"n": len(token_us), "min_us": min(token_us), "max_us": max(token_us),
+                   "mean_us": round(sum(token_us) / len(token_us), 1),
+                   "median_us": _median(token_us),
+                   "sum_us": round(sum(token_us), 1),
+                   "tps_upper_bound": round(1e6 / (sum(token_us) / len(token_us)), 2)}
+        self.correlate_tokens()
         return {
             "spans_total": len(self.spans),
             "tokens_total": len(self.tokens),
-            "tokens_matched": self.correlate_tokens(),
+            "tokens_matched": sum(1 for sp in self.spans if sp.token_id is not None),
+            "token_dispatch_us": tok,
             "per_kernel": per_kernel,
             "host_bound_pct": round(host_total / total * 100, 1) if total else None,
             "npu_bound_pct": round(npu_total / total * 100, 1) if total else None,
@@ -365,14 +437,27 @@ class DispatchTracer:
                                   "total": hit + miss},
             "bo": {"unique_ids": bo_unique, "reallocs": self.bo_reallocs,
                    "reuses": self.bo_reuses},
-            "verdict": self._verdict(host_total, npu_total, wait_total, sync_total),
+            "verdict": self._verdict(host_total, npu_total, wait_total, sync_total,
+                                     breakdown_present),
         }
 
-    def _verdict(self, host: float, npu: float, wait: float, sync: float) -> str:
+    def _verdict(self, host: float, npu: float, wait: float, sync: float,
+                 breakdown: bool) -> str:
+        if not breakdown:
+            return "TIMING_MEASURED" if self.spans else "no_trace"
         if not (host + npu):
-            return "no_trace"
+            return "TIMING_MEASURED"
         if host / (host + npu) > 0.6:
             return "HOST_BOUND"
         if wait / (host + npu) > 0.35:
             return "SYNC_WAIT_BOUND"
         return "NPU_BOUND"
+
+
+def _median(values: list[float]) -> float:
+    if not values:
+        return 0.0
+    s = sorted(values)
+    n = len(s)
+    mid = n // 2
+    return s[mid] if n % 2 else (s[mid - 1] + s[mid]) / 2.0

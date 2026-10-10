@@ -2,6 +2,8 @@
 import json
 import os
 
+import pytest
+
 from xpu_observer.diagnostics.dispatch_trace import DispatchTracer, DispatchSpan
 from xpu_observer.export import chrome_trace
 
@@ -136,6 +138,33 @@ def test_host_bound_verdict(tmp_path):
     tr = DispatchTracer()
     tr.add_span(kernel="k", host_us=100.0, npu_us=1.0, start_ns=0, end_ns=1_000_000)
     assert tr.stats()["verdict"] == "HOST_BOUND"
+
+
+def test_xdna_profile_dialect(tmp_path):
+    csv_text = (
+        "# _TOKEN row schema: submit_us=total_us wait_us=dispatch_count "
+        "sync_pre_us=npu_us sync_post_us=sync_us host_pre_us=host_us host_post_us=0\n"
+        "token_idx,layer_idx,kernel,submit_us,wait_us,sync_pre_us,sync_post_us,host_pre_us,host_post_us\n"
+        "0,-1,_TOKEN,1000,0,0,0,0,0\n"
+        "0,-1,int4_gemv,100,-100,0,0,0,0\n"
+        "0,-1,int4_gemv,150,-150,0,0,0,0\n"
+        "1,-1,_TOKEN,2000,0,0,0,0,0\n"
+        "1,-1,int4_gemv,250,-250,0,0,0,0\n"
+    )
+    path = _write(tmp_path, "xdna_profile.csv", csv_text)
+    tr = DispatchTracer()
+    assert tr.ingest_csv(path) == 5
+    assert len(tr.spans) == 3
+    assert all(s.token_id in (0, 1) for s in tr.spans)
+    assert all(s.kernel == "int4_gemv" for s in tr.spans)
+    assert [s.total_us for s in tr.spans] == [100.0, 150.0, 250.0]
+    assert len(tr.tokens) == 2
+    assert tr.tokens[0].total_us == 1000.0 and tr.tokens[1].total_us == 2000.0
+    st = tr.stats()
+    assert st["spans_total"] == 3
+    assert st["verdict"] == "TIMING_MEASURED"
+    assert st["token_dispatch_us"]["n"] == 2
+    assert st["token_dispatch_us"]["tps_upper_bound"] == pytest.approx(1e6 / 1500.0, rel=1e-3)
 
 
 def test_ingest_directory_autodetect(tmp_path):
