@@ -29,6 +29,21 @@ BAD = "#e05a5a"
 TABS = ["Dashboard", "Processes", "NPU Diagnostics", "Hooks", "MCP / API", "Settings"]
 
 
+def _as_list(v: Any) -> list:
+    """Tolerate both flat (new) and nested (legacy) raw shapes."""
+    if isinstance(v, dict):
+        v = v.get("processes") if "processes" in v else next(
+            (x for x in v.values() if isinstance(x, list)), [])
+    return v if isinstance(v, list) else []
+
+
+def _npu_block(snap: Any) -> dict:
+    raw = snap.raw.get("npu") or {}
+    if isinstance(raw, dict) and isinstance(raw.get("npu"), dict):
+        raw = raw["npu"]            # legacy nested shape
+    return raw if isinstance(raw, dict) else {}
+
+
 def _fmt(v: Any, digits: int = 1) -> str:
     if v is None:
         return "—"
@@ -254,7 +269,7 @@ class XPUApp:
             self.spark.push({"cpu%": val("cpu.load_pct") or 0.0,
                              "ram%": val("ram.pct") or 0.0,
                              "npu%": val("npu.load_pct") or 0.0})
-            xrt = (snap.raw.get("npu") or {}).get("xrt") or {}
+            xrt = _npu_block(snap).get("xrt") or {}
             self.dash_extra.config(text=(
                 f"NPU state={_fmt(val('npu.display'))}  dispatch/s={_fmt(val('npu.dispatch_s'))}  "
                 f"tps_est={_fmt(val('npu.tps_est'))}  kernels={_fmt(val('npu.kernels'),0)}  "
@@ -268,12 +283,20 @@ class XPUApp:
             self.status.config(text=f"ts={snap.ts:.1f}  metrics={len(m)}  "
                                     f"gpus={len(self.app.caps.get('gpus', []))}  "
                                     f"npu_present={self.app.caps.get('npu', {}).get('present')}")
+        except Exception as exc:  # noqa: BLE001
+            try:
+                self.status.config(text=f"refresh error: {exc}")
+            except Exception:  # noqa: BLE001
+                pass
         finally:
             self._refreshing = False
-            self.root.after(1200, self._refresh)
+            try:
+                self.root.after(1200, self._refresh)
+            except Exception:  # noqa: BLE001
+                pass
 
     def _refresh_processes(self, snap: Any) -> None:
-        procs = snap.raw.get("processes") or []
+        procs = _as_list(snap.raw.get("processes"))
         self.proc_tree.delete(*self.proc_tree.get_children())
         for p in procs[:200]:
             self.proc_tree.insert("", "end", values=(
@@ -292,7 +315,7 @@ class XPUApp:
             self.npu_ctx.insert("end", f"ctx{c.get('ctx_id')} pid{c.get('pid')} "
                                       f"[{c.get('name')}] sub={c.get('submissions')} "
                                       f"status={c.get('status')} err={c.get('errors')}\n")
-        kernels = (snap.raw.get("npu") or {}).get("kernels") or []
+        kernels = _npu_block(snap).get("kernels") or []
         if kernels:
             self.npu_ctx.insert("end", f"\nKernels: {len(kernels)}\n")
             for k in kernels[:20]:
