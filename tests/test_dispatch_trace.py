@@ -167,6 +167,28 @@ def test_xdna_profile_dialect(tmp_path):
     assert st["token_dispatch_us"]["tps_upper_bound"] == pytest.approx(1e6 / 1500.0, rel=1e-3)
 
 
+def test_xdna_runner_reports(tmp_path):
+    run = tmp_path / "20260101T000000Z"
+    run.mkdir()
+    (run / "report.json").write_text(json.dumps({
+        "status": "PASS",
+        "command": ["runner.exe", "xclbin.bin", "MLIR_AIE", "instr.bin"],
+        "manifest": {"sha256": "abc"},
+        "stdout": ("submit_ms=0.2\nxrt_wait_ms=3.1\nresident_dispatch_ms=3.5\n"
+                   "xrt_setup_ms=7.6\ninput_read_ms=18.7\nbo_alloc_ms=1.6\n"
+                   "h2d_write_ms=1.0\nh2d_sync_ms=0.2\noutput_write_ms=0.8\n"
+                   "runner_total_ms=37.2\n"),
+    }), encoding="utf-8")
+    tr = DispatchTracer()
+    assert tr.ingest_xdna_runner_reports(str(tmp_path)) == 1
+    s = tr.spans[0]
+    assert s.kernel == "MLIR_AIE"
+    assert s.wait_us == 3100.0 and s.npu_us == 3500.0
+    assert s.instruction_hash == "abc"
+    assert abs(s.host_us - (18.7 + 1.6 + 1.0 + 7.6 + 0.8) * 1000) < 1
+    assert tr.stats()["verdict"] == "HOST_BOUND"
+
+
 def test_ingest_directory_autodetect(tmp_path):
     _write(tmp_path, "xdna_profile.csv",
            "kernel,submit_us,wait_us,npu_us,sync_us,host_us,status\nk,1,2,3,4,5,ok\n")

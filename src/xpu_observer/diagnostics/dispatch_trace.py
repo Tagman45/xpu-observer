@@ -46,6 +46,8 @@ _PHASES = ("host_pre", "xrt_submit", "cx_wait", "np_dispatch", "np_completion",
            "sync_pre", "sync_post", "host_post", "bo_alloc", "bo_free",
            "instr_build", "instr_cache_hit")
 
+_RUNNER_MS = re.compile(r"([a-z0-9_]+)_ms=([\d.]+)")
+
 
 def _norm_field(header: str) -> Optional[str]:
     low = re.sub(r"[^a-z0-9_]", "", header.lower())
@@ -356,15 +358,52 @@ class DispatchTracer:
         return n
 
     def ingest(self, path: str) -> dict[str, Any]:
-        """Auto-detect a trace source: file (csv/jsonl/log) or directory."""
+        """Auto-detect a trace source: file (csv/jsonl/log), a runtime dir, or a
+        directory of xdna-runner report.json files."""
         if os.path.isdir(path):
             counts: dict[str, int] = {}
+            n = self.ingest_xdna_runner_reports(path)
+            if n:
+                counts["xdna-runner report.json"] = n
             for pat in ("xdna_profile*.csv", "dispatch*.csv", "*.jsonl", "runtime_trace*.log",
                         "runtime_stdout.log", "xrt_trace*.csv"):
                 for f in sorted(glob.glob(os.path.join(path, pat))):
                     counts[f] = self._ingest_one(f)
             return {"ingested": counts}
         return {"ingested": {path: self._ingest_one(path)}}
+
+    def ingest_xdna_runner_reports(self, root: str) -> int:
+        """Ingest `open-xdna-runtime` run reports: each report.json carries the runner
+        stdout with per-run XRT timings (submit_ms, xrt_wait_ms, resident_dispatch_ms,
+        xrt_setup_ms, bo_alloc_ms, h2d_write/sync_ms, runner_total_ms). One run ≈ one
+        dispatch, so each becomes a DispatchSpan with a real host/wait/npu split."""
+        n = 0
+        for rp in sorted(glob.glob(os.path.join(root, "**", "report.json"), recursive=True)):
+            try:
+                with open(rp, encoding="utf-8", errors="replace") as fh:
+                    data = json.load(fh)
+            except Exception:  # noqa: BLE001
+                continue
+            stdout = data.get("stdout") or ""
+            if "_ms=" not in stdout:
+                continue
+            ms = {m.group(1): float(m.group(2)) for m in _RUNNER_MS.finditer(stdout)}
+            cmd = data.get("command") or []
+            kernel = str(cmd[2]) if len(cmd) >= 3 else "MLIR_AIE"
+            instr = (data.get("manifest") or {}).get("sha256", "")
+            self.add_span(
+                kernel=kernel, instruction_hash=instr,
+                submit_us=ms.get("submit", 0.0) * 1000,
+                wait_us=ms.get("xrt_wait", 0.0) * 1000,
+                npu_us=ms.get("resident_dispatch", 0.0) * 1000,
+                sync_us=ms.get("h2d_sync", 0.0) * 1000,
+                host_us=(ms.get("input_read", 0.0) + ms.get("bo_alloc", 0.0)
+                         + ms.get("h2d_write", 0.0) + ms.get("xrt_setup", 0.0)
+                         + ms.get("output_write", 0.0)) * 1000,
+                total_us=ms.get("runner_total", 0.0) * 1000,
+                status=str(data.get("status", "")), source="xdna-runner")
+            n += 1
+        return n
 
     def _ingest_one(self, path: str) -> int:
         low = path.lower()
