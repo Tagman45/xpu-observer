@@ -114,6 +114,22 @@ def test_history_csv():
     assert out.count("\n") == 3
 
 
+def test_recorder_writes_rows(tmp_path):
+    from xpu_observer.core.event_bus import EventBus
+    from xpu_observer.core.collector import Collector
+    from xpu_observer.core.recorder import MetricsRecorder
+    bus = EventBus()
+    col = Collector(bus)
+    rec = MetricsRecorder(bus, log_dir=str(tmp_path))
+    path = rec.start()
+    col.collect_once(force_slow=True)
+    rec.stop()
+    assert os.path.exists(path)
+    lines = open(path, encoding="utf-8").read().splitlines()
+    assert len(lines) >= 2               # header + at least one cycle
+    assert lines[0].startswith("ts_iso")
+
+
 def test_collector_raw_not_double_nested():
     """Regression: raw must expose provider keys at top level (no nested wrapper)."""
     from xpu_observer.core.collector import Collector

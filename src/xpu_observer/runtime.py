@@ -9,14 +9,16 @@ from typing import Any, Optional
 from .core.capabilities import detect as detect_capabilities
 from .core.collector import Collector
 from .core.event_bus import EventBus
+from .core.recorder import MetricsRecorder
 from .core.scheduler import Scheduler
 
 
 class App:
-    def __init__(self, bus: Optional[EventBus] = None) -> None:
+    def __init__(self, bus: Optional[EventBus] = None, log_dir: Optional[str] = None) -> None:
         self.bus = bus or EventBus()
         self.collector = Collector(self.bus)
         self.scheduler = Scheduler(self.collector)
+        self.recorder = MetricsRecorder(self.bus, log_dir=log_dir)
         self._caps: Optional[dict[str, Any]] = None
         self._hooks: Any = None
         self._session_lock = threading.Lock()
@@ -43,6 +45,10 @@ class App:
         return self._hooks
 
     def start(self, collect_immediately: bool = True) -> None:
+        try:
+            self.recorder.start()          # disk logging first — independent of UI
+        except Exception:  # noqa: BLE001
+            pass
         self.scheduler.start()
         if collect_immediately:
             try:
@@ -52,6 +58,10 @@ class App:
 
     def stop(self) -> None:
         self.scheduler.stop()
+        try:
+            self.recorder.stop()
+        except Exception:  # noqa: BLE001
+            pass
 
     def snapshot_dict(self) -> dict[str, Any]:
         return self.collector.snap().as_dict()
