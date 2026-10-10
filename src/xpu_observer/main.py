@@ -24,6 +24,8 @@ def _parse(argv: Optional[list[str]] = None) -> argparse.Namespace:
                                 description="Universal Windows CPU/GPU/NPU monitor")
     p.add_argument("--once", action="store_true", help="collect once and print JSON")
     p.add_argument("--export", metavar="PATH", help="write snapshot export and exit")
+    p.add_argument("--trace", metavar="PATH", help="trace XRT (csv/jsonl/log/dir): stats + span timeline")
+    p.add_argument("--trace-export", metavar="PATH", help="with --trace: write Chrome Trace JSON and exit")
     p.add_argument("--api", action="store_true", help="start local HTTP API")
     p.add_argument("--api-port", type=int, default=8766)
     p.add_argument("--mcp", action="store_true", help="run MCP server (stdio)")
@@ -36,6 +38,20 @@ def _parse(argv: Optional[list[str]] = None) -> argparse.Namespace:
 def main(argv: Optional[list[str]] = None) -> int:
     args = _parse(argv)
     from .runtime import App  # noqa: PLC0415
+
+    if args.trace:
+        from .diagnostics.dispatch_trace import DispatchTracer  # noqa: PLC0415
+        from .export import chrome_trace  # noqa: PLC0415
+        tr = DispatchTracer()
+        tr.ingest(args.trace)
+        stats = tr.stats()
+        if args.trace_export:
+            with open(args.trace_export, "w", encoding="utf-8") as fh:
+                fh.write(chrome_trace.to_chrome_trace(tr.spans,
+                                                      stats["instruction_cache"]))
+            print(f"chrome trace -> {args.trace_export}")
+        print(json.dumps(stats, indent=2, default=str))
+        return 0
 
     if args.once or args.export:
         app = App()

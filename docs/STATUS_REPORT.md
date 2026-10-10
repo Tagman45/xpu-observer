@@ -58,6 +58,29 @@ Legend: **IMP** implemented · **TEST** auto-tested · **HW** validated on this 
 | Dispatch analysis (verdict) | ✅ | ✅ | — |
 | ctrlcode scan (size distribution) | ✅ | ✅ | — |
 
+## V0.6 — Dispatch tracer (added 2026-10-10)
+
+| Feature | IMP | TEST | HW |
+|---|---|---|---|
+| Parse dispatch CSV (xdna_profile style, breakdown µs) | ✅ | ✅ | synthetic only |
+| Parse JSONL runtime events (phase stream + complete spans) | ✅ | ✅ | synthetic only |
+| Parse TOKEN markers (runtime_trace.log) | ✅ | ✅ | |
+| Canonical span fields (pid, tid, hwctx_id, kernel, instruction_hash, bo_id, group_id, start_ns, end_ns, sync_direction, status, token_id) | ✅ | ✅ | |
+| Token ↔ kernel ↔ context correlation | ✅ | ✅ (815/815 matched on demo) | SYN |
+| Instruction cache hits/misses + BO realloc accounting | ✅ | ✅ | SYN |
+| Per-kernel cost + verdict (HOST_BOUND / SYNC_WAIT_BOUND / NPU_BOUND) | ✅ | ✅ | SYN |
+| Chrome Trace / Perfetto export (`ph X` + `ph C` counters) | ✅ | ✅ | |
+| CLI `--trace` / `--trace-export`, MCP (4 tools), API `/trace/*` | ✅ | ✅ | |
+| `scripts/make_demo_trace.py` (synthetic run) | ✅ | ✅ | SYN |
+
+Demo result (synthetic, 128 tokens, 815 dispatches): `post_attn_fused` cumulé = 257,6 ms
+NPU-vs-wait, `int4_gemv` = 12,5 ms NPU (wait domine), host 33% / NPU 67% / wait 26% →
+`NPU_BOUND`. **Valeurs fictives** — le pipeline distingue host, sync, wait et compute
+NPU, ce qui est le préalable pour investiguer « Qwen3.5-9B 1,8 → 0,6 tok/s avec K-split ».
+
+Instrumentation priority: runtime native trace first; DLL hook capture feeds the same
+normalized stream. Hooks remain confirmation-gated.
+
 ## Not done (honest)
 
 - **ETW collector**: stub returns `unavailable`. Needs AMD XDNA ETW GUIDs + trace session — V0.6.

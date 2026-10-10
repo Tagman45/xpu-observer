@@ -52,6 +52,30 @@ class _Handler(BaseHTTPRequestHandler):
                 snap = app.collector.snap()
                 return self._send(200, {"kernels": (snap.raw.get("npu") or {})
                                         .get("kernels", [])})
+            if u.path.startswith("/trace/"):
+                path = (q.get("path") or [""])[0]
+                if not path:
+                    return self._send(400, {"error": "path required"})
+                from ..diagnostics.dispatch_trace import DispatchTracer  # noqa: PLC0415
+                tr = DispatchTracer()
+                tr.ingest(path)
+                if u.path == "/trace/dispatch":
+                    limit = _int(q.get("limit", ["200"])[0], 200)
+                    st = tr.stats()
+                    st["spans"] = [s.as_dict() for s in tr.spans[:max(1, min(2000, limit))]]
+                    return self._send(200, st)
+                if u.path == "/trace/cache":
+                    st = tr.stats()
+                    return self._send(200, {"instruction_cache": st["instruction_cache"],
+                                            "bo": st["bo"], "spans_total": len(tr.spans)})
+                if u.path == "/trace/export":
+                    from ..export import chrome_trace  # noqa: PLC0415
+                    fmt = q.get("format", ["chrome"])[0]
+                    if fmt == "chrome":
+                        body = chrome_trace.to_chrome_trace(
+                            tr.spans, tr.stats()["instruction_cache"])
+                        return self._send(200, body, ctype="application/json")
+                    return self._send(400, {"error": "format inconnu (chrome)"})
             if u.path == "/drivers":
                 return self._send(200, app.caps.get("drivers", {}))
             if u.path == "/hooks":

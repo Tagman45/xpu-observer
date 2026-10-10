@@ -50,7 +50,10 @@ Implemented and hardware-validated where marked:
 | `get_hook_events` | captured events if a hook is verified active |
 | `get_hook_diagnostics` | state, reason, verifiable method |
 | `analyze_npu_activity` | who uses the NPU + global state |
-| `analyze_dispatch_latency` | dispatch/s, errors, verdict |
+| `analyze_dispatch_latency` | snapshot NPU metrics, or `path`=trace → per-dispatch verdict |
+| `get_dispatch_trace` | ingest trace (`path`), return stats + span timeline (`limit`) |
+| `trace_cache_stats` | instruction cache hits/misses + BO realloc/reuse counts |
+| `export_trace` | `path` + `format=chrome` → Chrome Trace / Perfetto JSON |
 | `detect_cpu_fallback` | is NPU idle while inference may run on CPU |
 | `compare_cpu_gpu_npu` | relative loads |
 | `export_metrics` | snapshot as `json` or `csv` |

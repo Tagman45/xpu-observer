@@ -90,7 +90,10 @@ def _build_tools() -> list[dict[str, Any]]:
         "get_hook_events": ("evenements captes par un hook actif", [{"name": "hook", "type": "string"}]),
         "get_hook_diagnostics": ("diagnostique de sante d'un hook", [{"name": "hook", "type": "string"}]),
         "analyze_npu_activity": ("qui utilises le NPU + etat global", []),
-        "analyze_dispatch_latency": ("analyse dispatches/s et contextes", []),
+        "analyze_dispatch_latency": ("analyse dispatches/s et contextes ou trace path", [{"name": "path", "type": "string"}]),
+        "get_dispatch_trace": ("parse une trace XRT (dispatch CSV/JSONL) et produit chronologie + stats", [{"name": "path", "type": "string", "required": True}, {"name": "limit", "type": "integer"}]),
+        "trace_cache_stats": ("compte cache instructions (hits/misses) et reallocations BO", [{"name": "path", "type": "string", "required": True}]),
+        "export_trace": ("exporte une trace en Chrome Trace / Perfetto", [{"name": "path", "type": "string", "required": True}, {"name": "format", "type": "string"}]),
         "detect_cpu_fallback": ("indique si inference tourne sur CPU (pas NPU)", []),
         "compare_cpu_gpu_npu": ("charge relative CPU/GPU/NPU", []),
         "export_metrics": ("export snapshot", [{"name": "format", "type": "string", "enum": ["json", "csv"]}]),
@@ -107,6 +110,16 @@ def _build_tools() -> list[dict[str, Any]]:
 
 def _metric_subset(snap: Any, prefix: str) -> dict[str, Any]:
     return {k: v.as_dict() for k, v in snap.metrics.items() if k.startswith(prefix)}
+
+
+def _load_tracer(args: dict[str, Any]) -> Any:
+    from ..diagnostics.dispatch_trace import DispatchTracer  # noqa: PLC0415
+    path = args.get("path")
+    if not path:
+        raise ValueError("path required")
+    tr = DispatchTracer()
+    tr.ingest(path)
+    return tr
 
 
 def _handle(app: Any, name: str, args: dict[str, Any]) -> dict[str, Any]:
@@ -172,7 +185,30 @@ def _handle(app: Any, name: str, args: dict[str, Any]) -> dict[str, Any]:
         return _ok({"state": snap.metrics.get("npu.display", ).as_dict()["value"] if "npu.display" in snap.metrics else "?",
                     "users": procs})
     if name == "analyze_dispatch_latency":
+        if args.get("path"):
+            tr = _load_tracer(args)
+            return _ok(tr.stats())
         return _ok(_metric_subset(snap, "npu.") )
+    if name == "get_dispatch_trace":
+        tr = _load_tracer(args)
+        limit = int(args.get("limit") or 200)
+        stats = tr.stats()
+        stats["spans"] = [s.as_dict() for s in tr.spans[:max(1, min(2000, limit))]]
+        return _ok(stats)
+    if name == "trace_cache_stats":
+        tr = _load_tracer(args)
+        return _ok({"instruction_cache": tr.stats()["instruction_cache"],
+                    "bo": tr.stats()["bo"],
+                    "spans_total": len(tr.spans)})
+    if name == "export_trace":
+        tr = _load_tracer(args)
+        fmt = args.get("format", "chrome")
+        if fmt == "chrome":
+            from ..export import chrome_trace  # noqa: PLC0415
+            return _ok({"format": "chrome-trace-json",
+                        "content": chrome_trace.to_chrome_trace(tr.spans,
+                                                                tr.stats()["instruction_cache"])})
+        return _err(f"format inconnu: {fmt} (chrome)")
     if name == "detect_cpu_fallback":
         cpu = snap.metrics.get("cpu.load_pct")
         npu_state = snap.metrics.get("npu.display").as_dict().get("value") if "npu.display" in snap.metrics else "?"

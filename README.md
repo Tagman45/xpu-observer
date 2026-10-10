@@ -38,10 +38,34 @@ Tested on Python 3.13, Windows 10/11. Works with and without an NPU.
 ```bash
 xpu-observer --once                    # collect one pass, print JSON (scripting)
 xpu-observer --export snap.csv         # one pass -> CSV snapshot
+xpu-observer --trace TRACE_DIR         # dispatch tracer: stats + per-kernel timing
+xpu-observer --trace TRACE --trace-export out.chrome.json   # + Chrome trace export
 xpu-observer --api                     # headless: local API on 127.0.0.1:8766
 xpu-observer --api --mcp               # API + MCP stdio server
 xpu-observer --ui                      # tkinter dashboard
 ```
+
+### Dispatch tracer (V0.6)
+
+Parses runtime traces (dispatch CSV, JSONL dispatch events, `runtime_trace`
+TOKEN markers — auto-detected in a directory) and produces a per-dispatch timeline:
+`pid, tid, hwctx_id, kernel, instruction_hash, bo_id, group_id, start_ns, end_ns,
+sync_direction, status, token_id` + a µs breakdown `submit/wait/npu/sync/host`. It
+counts instruction cache hits/misses and BO reallocations, correlates each dispatch
+to its token, and returns a verdict (`HOST_BOUND | SYNC_WAIT_BOUND | NPU_BOUND`)
+plus per-kernel cost — exactly what separates CPU prep + XRT sync from real XDNA2
+compute when a K-split change tanks throughput.
+
+No hardware needed to try it:
+
+```bash
+python scripts/make_demo_trace.py demo_trace          # 64 tokens synthetic
+xpu-observer --trace demo_trace --trace-export demo.chrome.json
+```
+
+Instrumentation priority (red-team compliant): the runtime's **own** trace mechanism
+is ingested first; DLL hooks are the fallback and feed the same normalized event stream.
+Simulated runs are never presented as hardware measurements.
 
 ### Local API (read-only)
 
@@ -75,6 +99,9 @@ Bound to `127.0.0.1` only. No write endpoints.
 | V0.3 | Hook catalog + compatibility | ✅ | ✅ unit | conservative by design |
 | V0.4 | Confirmation-based hook manager | ✅ | ✅ | manual (never auto-injects) |
 | V0.5 | AI profiler / dispatch analysis | 🔶 core | 🔶 | not hardware-validated |
+| V0.6 | **Dispatch tracer** (XRT run/start/wait/sync) | ✅ | ✅ unit+CLI | synthetic demo only |
+| V0.6 | Token↔kernel↔context correlation + Chrome/Perfetto export | ✅ | ✅ | synthetic demo only |
+| V0.6 | Instruction cache hits/misses + BO realloc accounting | ✅ | ✅ | synthetic demo only |
 | — | ETW provider | ⛔ stubbed | — | not implemented |
 | — | PySide6 GUI | ⛔ | — | tkinter used (lighter, no dep) |
 
