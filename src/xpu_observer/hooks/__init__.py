@@ -1,0 +1,1 @@
+"""hooks package (registry / discovery / compatibility / manager / verifier)."""

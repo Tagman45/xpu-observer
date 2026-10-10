@@ -1,0 +1,32 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.13" }
+      - run: pip install -e .[dev]
+      - run: python -m compileall src tests
+      - run: pytest tests -q --disable-warnings
+
+  build:
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.13" }
+      - run: pip install -e .[dev]
+      - run: pip install pyinstaller
+      - name: Build onefile EXE
+        run: pyinstaller --noconfirm --clean --onefile --name xpu-observer --paths src src\xpu_observer\main.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xpu-observer-windows
+          path: dist/xpu-observer.exe

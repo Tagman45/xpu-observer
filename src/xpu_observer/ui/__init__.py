@@ -1,0 +1,1 @@
+"""UI package (tkinter dashboard + optional tray)."""

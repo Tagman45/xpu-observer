@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "xpu-observer"
+version = "0.1.0"
+description = "Universal Windows CPU/GPU/NPU monitor + DLL hook manager + MCP server"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "XPU Observer contributors" }]
+dependencies = [
+    "psutil>=5.9",
+    "mcp>=1.0",
+]
+
+[project.optional-dependencies]
+tray = ["pystray>=0.19", "Pillow>=9"]
+gui = ["PySide6>=6.5"]
+dev = ["pytest>=7"]
+
+[project.scripts]
+xpu-observer = "xpu_observer.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"xpu_observer" = ["hooks/catalog/*.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
